@@ -14,7 +14,8 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
-
+// Scanner is the basic implementation of what we need to launch
+// scans.
 type Scanner struct {
 	srcIP   net.IP
 	dstIP   net.IP
@@ -55,7 +56,7 @@ func (s *Scanner) setLocalAddress() error {
 	return err
 }
 
-
+// Connect gets a connection for sending packets
 func (s *Scanner) Connect() error {
 	var err error
 	s.conn, err = net.ListenPacket("ip4:tcp", fmt.Sprintf("%s", "0.0.0.0"))
@@ -65,7 +66,7 @@ func (s *Scanner) Connect() error {
 	return nil
 }
 
-
+// Close releases the resources of the connection in the Scanner.
 func (s *Scanner) Close() {
 	s.conn.Close()
 }
