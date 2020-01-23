@@ -1,0 +1,146 @@
+#+TITLE: high-performance-scanners
+
+* Port Scanning in Go
+
+Go's concurrency model make it an excellent language for network programming.
+While the standard library is great for many high-level applications, the
+language is young to have developed many of the tools to support lower-level
+access.
+
+We'll use gopacket to get lower-level access and hack around the standard
+library to get more portability.
+
+* The Usefulness of Port Scanners
+
+- Network recon
+- Counter measures
+
+* Implementing a TCP Port Scanner with Go's net Package
+
+We'll implement a light and fast method to scan by sending a single-packet, but this
+isn't the only way. It's simpler just to see if we can connect at ports and when
+we can get a full TCP connection we close it and say that we found the port
+open.
+
+** Overview of Connect TCP Scanning
+
+Early methods of TCP port scanning involved using higher level routines that
+attempt to form a TCP connection. Go wasn't even a twinkle in Rob Pike's eye
+back when that was the predominant approach to port scans. But if Go was a thing
+then one of those scanners might have used some code like this...
+
+```
+conn, err := net.Dial("tcp", fmt.Printf("scanme.nmap.org:%d", portNo))
+```
+
+We would follow that with some code to handle the error like...
+
+```
+if err != nil {
+    fmt.Printf("%d: %v\n", portNo, err)
+    continue
+}
+```
+
+And for the cases where a connection established we would close it.
+
+```
+err = conn.Close()
+```
+
+This last bit here involves another part of the protocol where not only will we
+be reclaiming local resources we allocated for the connection like file
+descriptors, we're going to finish with a sign-off too. This is called a
+connection scanner, because it connects with ports that will to determine if
+they're open.
+
+It definitely has its drawbacks, but it's also adequate for some purposes.
+
+I ran an implementation on my machine that checked the system ports (that's port
+numbers less than 1024) in about a second.
+
+The code will also give us a fine starting point for writing additional methods
+later.
+
+** The pros and cons of this approach
+
+As you saw from the few lines of code we needed at each step, this method is
+simple to implement. The standard library will handle the connection for us with
+just a few inputs. As you'll see in a minute there's a lot going on behind the
+scenes and it's convenient that we don't have to get our hands dirty.
+
+On the downside this method is a lot less efficient than it could be for all
+parties. Opening the connection means we'll tie up low-level resources on each
+machine, and then we'll have to close the connection which means another packet.
+
+But none of that is a big deal. What we really care about is that all of this
+goes slow and we're stuck parsing connection errors to find out the details of
+our scan when we need the packets to see for ourselves.
+
+Let's move on and get the goods.
+
+* A look at SYN scanning
+
+There may have been a time when we would have said that the connection scanning
+method wasn't stealthy. That's certainly true, but the method we're about to
+walk through by itself is likely to make an equally large impression on any
+intrusion detection system.
+
+This will work like the default scan in nmap
+(https://nmap.org/book/synscan.html). It's called a SYN scanner, because it
+relies on sending the first packet in the TCP connection request. It's a SYN
+packet, because it's short for synchronization and includes a sequence number
+that starts the connection.
+
+To understand the mechanism of the SYN scanner recall that the TCP connection is
+initiated with a 3-way handshake as follows...
+
+1. Caller sends a SYN packet.
+2. Recipient responds with SYN, ACK packet.
+3. Caller sends an ACK.
+
+At least that's the flow when we send a SYN to an open TCP port. Another
+possibility is that the recipient sends RST, ACK. This is a type of
+acknowledgement, but tells tells the caller to reset. We interpret this as a
+closed port. Yet another possibility is that we get no response. We say this
+traffic is filtered and we mean that there's a firewall that won't respond to
+traffic that isn't allowed.
+
+Of course we don't know to the highest confidence that non-responsive ports are
+filtered. So we may handle that with a retry after a timeout. But at
+some point we conclude that the traffic is filtered. Nmap uses statistics
+from the ongoing scan to determine an appropriate timeout and sends one
+follow-up probe. Then it marks the port filtered if it there's no reply.
+
+The packet types are signified by the control bits in the 13th octet of the TCP
+header. Those flags are laid out as follows and numbered here in network order.
+
+|---+---+---+---+---+---+---+---|
+| C | E | U | A | P | R | S | F |
+|---+---+---+---+---+---+---+---|
+| 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
+|---+---+---+---+---+---+---+---|
+
+The SYN packet has only the 1 bit set. That is the S bit. Then SYN-ACK has the 1
+and 4 set. That is the S and A. Then the ACK sets the 4th place. And the RST,
+which is also an ACK will set the 2 and 4.
+
+Here's how Nmap sets the states for the scan report...
+
+|-------------------------------------------------------------+----------------|
+| Probe Response                                              | Assigned State |
+|-------------------------------------------------------------+----------------|
+| TCP SYN/ACK response                                        | open           |
+| TCP RST response                                            | closed         |
+| No response received (even after retransmissions)           | filtered       |
+| ICMP unreachable error (type 3, code 1, 2, 3, 9, 10, or 13) | filtered       |
+|-------------------------------------------------------------+----------------|
+
+Now we have a design for a scanner that could actually be useful. It's efficient
+and doesn't do a lot more than we need.
+
+So let's write some actual Go code.
+
+* Make a SYN packet
+
+Our first crack at this code is going to work like a
