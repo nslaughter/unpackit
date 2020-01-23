@@ -7,28 +7,105 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"math/rand"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
 
-// get the local ip and port based on our destination ip
-func localIPPort(dstip net.IP) (net.IP, int) {
-	serverAddr, err := net.ResolveUDPAddr("udp", dstip.String()+":12345")
+
+type Scanner struct {
+	srcIP   net.IP
+	dstIP   net.IP
+	srcPort layers.TCPPort
+	conn    net.PacketConn
+}
+
+// straightforward address resolution. Note that this is going to be
+// a few microseconds if you're recently resolved thd address and quite a
+// few milliseconds if the TTL of the record is expire on this machine. So
+// put this in an init or warm-up section so it won't be counted in latency stats
+// and incorrectly influence program behavior or reporting.
+func (s *Scanner) resolveHost(arg string) error {
+	// resolve host address or IP to get a []net.IP
+	dstaddrs, err := net.LookupIP(arg)
 	if err != nil {
-		log.Fatal(err)
+		return err
+	}
+	// parse the dst host and port from the cmd line os.Args
+	s.dstIP = dstaddrs[0].To4()
+	return nil
+}
+
+
+func (s *Scanner) setLocalAddress() error {
+	serverAddr, err := net.ResolveUDPAddr("udp", s.dstIP.String()+":12345")
+	if err != nil {
+		return err
 	}
 
 	// We don't actually connect to anything, but use the net library to
-	// populate our localIP and port.
 	if conn, err := net.DialUDP("udp", nil, serverAddr); err == nil {
 		if udpaddr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
-			return udpaddr.IP, udpaddr.Port
+			s.srcIP = udpaddr.IP
+			s.srcPort = layers.TCPPort(udpaddr.Port)
 		}
 	}
-	log.Fatal("could not get local ip: " + err.Error())
-	return nil, -1
+	return err
+}
+
+
+func (s *Scanner) Connect() error {
+	var err error
+	s.conn, err = net.ListenPacket("ip4:tcp", fmt.Sprintf("%s", "0.0.0.0"))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+
+func (s *Scanner) Close() {
+	s.conn.Close()
+}
+
+
+// Probe sends a SYN packet to the port given as argument
+func (s *Scanner) Probe(dstport layers.TCPPort) {
+	// Our IP header... only necessary for TCP checksumming.
+	ip := &layers.IPv4{
+		SrcIP:    s.srcIP,
+		DstIP:    s.dstIP,
+		Protocol: layers.IPProtocolTCP,
+	}
+	// Our TCP header
+	tcp := &layers.TCP{
+		SrcPort: s.srcPort,
+		DstPort: dstport,
+		Seq:     rand.Uint32() / 2,
+		SYN:     true,
+		Window:  14600,
+	}
+	tcp.SetNetworkLayerForChecksum(ip)
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		ComputeChecksums: true,
+		FixLengths:       true,
+	}
+	// serialize for the wire
+	if err := gopacket.SerializeLayers(buf, opts, tcp); err != nil {
+		log.Fatal(err)
+	}
+	// write the SYN to the wire
+	if _, err := s.conn.WriteTo(buf.Bytes(), &net.IPAddr{IP: s.dstIP}); err != nil {
+		log.Fatal(err)
+	}
+
+	// Set deadline so we don't wait forever.
+	if err := s.conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		log.Fatal(err)
+	}
 }
 
 
@@ -39,100 +116,57 @@ func main() {
 	}
 	log.Println("starting")
 
-	// resolve host address or IP to get []string of form "x.x.x.x"
-	dstaddrs, err := net.LookupIP(os.Args[1])
+	// configure scanner
+	s := Scanner{}
+	if err := s.resolveHost(os.Args[1]); err != nil {
+		log.Fatal(err)
+	}
+	err := s.setLocalAddress()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// parse the dst host and port from the cmd line os.Args
-	dstip := dstaddrs[0].To4()
 	var dstport layers.TCPPort
 	if d, err := strconv.ParseUint(os.Args[2], 10, 16); err != nil {
 		log.Fatal(err)
 	} else {
 		dstport = layers.TCPPort(d)
 	}
-	fmt.Printf("Sending to ip %v on port %d\n", dstip, dstport)
-	srcip, sport := localIPPort(dstip)
-	fmt.Printf("Sending from ip %v on port %d\n", srcip, sport)
-	srcport := layers.TCPPort(sport)
-	log.Printf("using srcip: %v", srcip.String())
 
-	// Our IP header... only necessary for TCP checksumming.
-	ip := &layers.IPv4{
-		SrcIP:    srcip,
-		DstIP:    dstip,
-		Protocol: layers.IPProtocolTCP,
-	}
-	// Our TCP header
-	tcp := &layers.TCP{
-		SrcPort: srcport,
-		DstPort: dstport,
-		Seq:     1105024978,
-		SYN:     true,
-		Window:  14600,
-	}
-	tcp.SetNetworkLayerForChecksum(ip)
-
-	// Serialize.  Note:  we only serialize the TCP layer, because the
-	// socket we get with net.ListenPacket wraps our data in IPv4 packets
-	// already.  We do still need the IP layer to compute checksums
-	// correctly, though.
-	buf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{
-		ComputeChecksums: true,
-		FixLengths:       true,
-	}
-	if err := gopacket.SerializeLayers(buf, opts, tcp); err != nil {
-		log.Fatal(err)
-	}
-
-	// connect to host
-	conn, err := net.ListenPacket("ip4:tcp", fmt.Sprintf("%s", "0.0.0.0"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
-
-	handle, err := pcap.OpenLive("en0", int32(sport), true, pcap.BlockForever)
+	handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, pcap.BlockForever)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Println("writing request")
-	if _, err := conn.WriteTo(buf.Bytes(), &net.IPAddr{IP: dstip}); err != nil {
+	// create packetlistener
+	if err := s.Connect(); err != nil {
 		log.Fatal(err)
 	}
 
-	// Set deadline so we don't wait forever.
-	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		log.Fatal(err)
-	}
+	s.Probe(dstport)
 
-	ipFlow := gopacket.NewFlow(layers.EndpointIPv4, ip.DstIP, ip.SrcIP)
+	ipFlow := gopacket.NewFlow(layers.EndpointIPv4, s.dstIP, s.srcIP)
 
 	for {
+		data, _, err := handle.ReadPacketData()
+		if err == pcap.NextErrorTimeoutExpired {
+			log.Printf("timeout")
+		} else if err != nil {
+			log.Printf("err reading packet: %v, err")
+		}
 
-	data, _, err := handle.ReadPacketData()
-	if err == pcap.NextErrorTimeoutExpired {
-		log.Printf("timeout")
-	} else if err != nil {
-		log.Printf("err reading packet: %v, err")
-	}
-
-	packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy)
+		packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy)
 
 		if net := packet.NetworkLayer(); net == nil {
 			//log.Printf("packet has no network layer")
 		} else if net.NetworkFlow() != ipFlow {
-			// lets ignore packets that don't match our connection
+			// ignore packets that don't match our connection
 		} else if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer == nil {
-			log.Printf("ipLayer is nil")
+			// log.Printf("ipLayer is nil")
 		} else if ip, ok := ipLayer.(*layers.IPv4); !ok {
 			panic("ip layer is not ip layer :-/")
 		} else if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer == nil {
-			// log.Printf("packet has not tcp layer")
+			// log.Printf("packet has no tcp layer")
 		} else if tcp, ok := tcpLayer.(*layers.TCP); !ok {
 			// We panic here because this is guaranteed to never happen.
 			panic("tcp layer is not tcp layer :-/")
