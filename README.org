@@ -1,26 +1,66 @@
 #+TITLE: high-performance-scanners
 
-* Port Scanning in Go
+* The state of this repo
 
-Go's concurrency model make it an excellent language for network programming.
-While the standard library is great for many high-level applications, the
-language is young to have developed many of the tools to support lower-level
-access.
+This isn't currently a model of good Go code. And while the program can send a
+single probe at this time it isn't useful as a scanner. What we have here is an
+explanation of port scanning and the basic code to accomplish it one port at a
+time.
 
-We'll use gopacket to get lower-level access and hack around the standard
-library to get more portability.
+I'll add the scanner management when I get time. I also would like to add a few
+other types of scans. If you want to see a play-by-play of how SYN probes work
+or learn how to craft packets in Go then you're in the right place.
 
-* The Usefulness of Port Scanners
+* Why Port Scanning
 
-- Network recon
-- Counter measures
+Port scanning is about finding out the state of various ports. The process
+involves sending packets to ports on a host and categorizing them based on the
+response or lack of response.
+
+- Network recon for penetration.
+
+  Network penetration outside of testing is commonly called "Black Hat," but it
+  doesn't always deserve such a sinister title. It's simply that it's hostile.
+  Think of it more like this...
+  1. Patriots volunteer to trespass and kill on sovereign territory and once
+     they're enlisted they're acting illegally if they refuse orders to do those
+     things.
+  2. Sometimes the best defense is a good offense.
+  3. None of the foregoing makes it OK to do bad things to innocent people.
+
+- Penetration testing.
+
+  It's like the above except that you're going to be working the results as a
+  punch list for remediation instead of exploitation.
+
+- Validating or troubleshooting network configuration.
+
+- Discovering available hosts and services on the network.
+
+
+* Why Go?
+
+Go's concurrency make it a natural fit for some aspects of network programming.
+Think of servers handling multiple connections concurrently or port scanners
+where it's more efficient to run the logic of sending packets separate from
+receiving.
+
+The standard library offers excellent networking support for a variety of
+networked applications in the net package and it's sub-packages. There's also a
+low-level library called gopacket that makes packet crafting and analysis
+simpler.
 
 * Implementing a TCP Port Scanner with Go's net Package
 
 We'll implement a light and fast method to scan by sending a single-packet, but this
-isn't the only way. It's simpler just to see if we can connect at ports and when
-we can get a full TCP connection we close it and say that we found the port
-open.
+isn't the only way. This is just the default scan (for users with root
+priveleges) in the famous nmap utility.
+
+But first we're going to look at how we could do this using the standard
+library's connect method. This approach will attempt a full TCP handshake and
+either use the success to conclude ports are open, then parse errors to
+determine the port state. Timeouts are filtered. Connection refused means the
+ports are closed.
 
 ** Overview of Connect TCP Scanning
 
@@ -62,12 +102,16 @@ numbers less than 1024) in about a second.
 The code will also give us a fine starting point for writing additional methods
 later.
 
+NOTE: I'll write some actual code that implements this later. Crafting and
+analyzing the packets for a SYN scan was my priority in writing the code.
+
 ** The pros and cons of this approach
 
 As you saw from the few lines of code we needed at each step, this method is
 simple to implement. The standard library will handle the connection for us with
 just a few inputs. As you'll see in a minute there's a lot going on behind the
-scenes and it's convenient that we don't have to get our hands dirty.
+scenes and this method is convenient in that we don't have to get our hands
+dirty.
 
 On the downside this method is a lot less efficient than it could be for all
 parties. Opening the connection means we'll tie up low-level resources on each
@@ -125,7 +169,7 @@ The SYN packet has only the 1 bit set. That is the S bit. Then SYN-ACK has the 1
 and 4 set. That is the S and A. Then the ACK sets the 4th place. And the RST,
 which is also an ACK will set the 2 and 4.
 
-Here's how Nmap sets the states for the scan report...
+Here's how Nmap sets the states for their scan report...
 
 |-------------------------------------------------------------+----------------|
 | Probe Response                                              | Assigned State |
@@ -136,11 +180,71 @@ Here's how Nmap sets the states for the scan report...
 | ICMP unreachable error (type 3, code 1, 2, 3, 9, 10, or 13) | filtered       |
 |-------------------------------------------------------------+----------------|
 
-Now we have a design for a scanner that could actually be useful. It's efficient
-and doesn't do a lot more than we need.
+Our code won't cover all of these options at this time. We'll focus first on
+open and close responses.
 
-So let's write some actual Go code.
+Now we have a design for a scanner that could be more useful, so long as we can
+run it on machine as a priveleged user. It's efficient and doesn't send packets
+we don't need and it looks directly at the packets to determine port status.
 
-* Make a SYN packet
+We're not quite ready to write our code even though we know our approach.
+Because we need to cover some detail about how we'll craft our packets in Go.
 
-Our first crack at this code is going to work like a
+* Crafting Packets in Go  this code is going to work like a
+
+We're just writing bytes to a network connection, so if we know what to put in
+those bytes we can do anything. The trouble is that this would make for writing
+lots of code that isn't that interesting. While it's certainly a valuable
+exercise, progressing toward a port scanner one octet at a time would be too
+tedious for our purposes.
+
+Recall the TCP header...
+
+        0                            15                              31
+       -----------------------------------------------------------------
+       |          source port          |       destination port        |
+       -----------------------------------------------------------------
+       |                        sequence number                        |
+       -----------------------------------------------------------------
+       |                     acknowledgment number                     |
+       -----------------------------------------------------------------
+       |  HL   | rsvd  |C|E|U|A|P|R|S|F|        window size            |
+       -----------------------------------------------------------------
+       |         TCP checksum          |       urgent pointer          |
+       -----------------------------------------------------------------
+
+And consider moreover that this illustration doesn't include other layers of the
+packet. The packets we want to anlyze for TCP are carried within IP packets,
+which are carried within Ethernet frames. There's another 32 octets of control
+information in the IP header. We won't go into any detail about the ethernet
+aspects of our transmission as we won't be dealing with it directly in our code.
+
+For handling all of this detail there's a handy library called gopacket. It
+started with a libpcap wrapper in a project originally called gopcap.
+
+** Using gopacket
+
+Ultimately we're going to need functions that write (send) our packets and read
+them for analysis. Gopacket can provide us with both.
+
+I've created a struct called Scanner with a method called Probe to send the
+packets. It builds an IP layer from our specification of our local IP address
+(SrcIP), the destination IP address (DstIP), and the Protocol. We're setting
+that from a constant in the gopacket/layers package `layers.IPProtocolTCP`.
+
+The method also provides information that's specific to the TCP packet in the
+form of local port (SrcPort), the destination port (DstPort), the sequence
+number (Seq), and finally we provide it with the most important bit for a SYN
+scanner which is that the SYN bit is set to true. This is 2nd control bit of the
+13 octet of the TCP header.
+
+We tell gopacket library to serialize all of this for us, which means to render
+a byte array which is what we'll put on the network.
+
+It might seem like a lot to keep track of, but doing all of this is nothing
+compared to the program with the behind the scenes work added in. Thankfully we
+have that work already done in gopacket.
+
+The Probe method is where you'll find the first use of gopacket. It uses a
+connection for packets from the standard library to send a SYN packet.
+
