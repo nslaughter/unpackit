@@ -113,27 +113,14 @@ type packetCapture struct {
 	captureInfo gopacket.CaptureInfo
 }
 
-type TCPCapture struct {
+type tcpCapture struct {
 	tcp         layers.TCP
 	captureInfo gopacket.CaptureInfo
 }
 
-// wireFilter gets a packet off of the wire
-func wireFilter(h *pcap.Handle, tcpCh chan layers.TCP, done <-chan bool) {
-	//result := make(chan gopacket)
-	var eth layers.Ethernet
-	var ip4 layers.IPv4
-	var ip6 layers.IPv6
-	var tcp layers.TCP
-	// WARNING: decoding into layer vars not goroutine safe
-	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp)
-	decoded := []gopacket.LayerType{}
-
-	pcapChan := make(chan packetCapture)
-	defer close(pcapChan)
-
-	go func() {
-		// for exponential backoff when we see EOF
+// capturePackets reads the wire with using h - the pcap.Handle, sends the packetCapture
+// on the pcapCh channel, and quits if it reads from the done channel
+func capturePackets(h *pcap.Handle, pcapCh chan<- packetCapture, done <-chan bool) {
 		sleep := 10 * time.Microsecond
 		for {
 			pd, ci, err := h.ReadPacketData() // blocks forever
@@ -150,22 +137,63 @@ func wireFilter(h *pcap.Handle, tcpCh chan layers.TCP, done <-chan bool) {
 				}
 			}
 			if pd != nil {
-				pcapChan <- packetCapture{packetData: pd, captureInfo: ci}
+				// ???
+				pcapCh <- packetCapture{packetData: pd, captureInfo: ci}
 				sleep = 10 * time.Microsecond // reset backoff
 			}
+			select {
+			case <-done:
+				return
+			default:
+				continue
+			}
 		}
-	}()
+}
+
+
+// decodeTCP decodes our packet capture into a TCP specific representation
+func decodeTCP(pcapCh <-chan packetCapture, tcpcapCh chan<- tcpCapture, done <-chan bool) {
+	var eth layers.Ethernet
+	var ip4 layers.IPv4
+	var ip6 layers.IPv6
+	var tcp layers.TCP
+	// WARNING: decoding into layer vars not goroutine safe
+	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp)
+	decoded := []gopacket.LayerType{}
 
 	for {
-		// read packets in a new goroutine
 		select {
-		case pcap := <-pcapChan:
+		case pcap := <-pcapCh:
 			if err := parser.DecodeLayers(pcap.packetData, &decoded); err != nil {
+				// TODO(@nslaughter): some error conditions will still contain interesting info.
+				fmt.Println(err)
 				continue
-			} else if tcp.RST {
-				tcpCh <- tcp
-			} else if tcp.SYN && tcp.ACK {
-				tcpCh <- tcp
+			} else {
+				tcpcapCh <- tcpCapture{tcp, pcap.captureInfo}
+			}
+		case <-done:
+			return
+		}
+	}
+}
+
+
+// recordResults will just put the report from parsing the captured packets
+func recordResults(results map[string][]int, tcpcapCh <-chan tcpCapture, done <-chan bool) {
+	if results["RST"] == nil {
+		results["RST"] = make([]int, 0)
+	}
+	if results["ACK"] == nil {
+		results["ACK"] = make([]int, 0)
+	}
+	for {
+		select {
+		case tcpcap := <-tcpcapCh:
+			fmt.Println("Read packet in tcpcap")
+			if tcpcap.tcp.RST {
+				results["RST"] = append(results["RST"], int(tcpcap.tcp.SrcPort))
+			} else if tcpcap.tcp.SYN && tcpcap.tcp.ACK {
+				results["ACK"] = append(results["ACK"], int(tcpcap.tcp.SrcPort))
 			}
 		case <-done:
 			return
@@ -184,20 +212,25 @@ func (s *Scanner) Capture() {
 	}
 	defer handle.Close()
 	handle.SetDirection(pcap.DirectionIn) // Does this get overwritten by BPFFilter expr?
-	handle.SetBPFFilter(fmt.Sprintf("tcp dst port %d && src host %s", s.srcPort, s.dstIP))
+	handle.SetBPFFilter(fmt.Sprintf("dst port %d && src host %s", s.srcPort, s.dstIP))
 
 	done := make(chan bool)
-	tcp := make(chan layers.TCP)
-	defer close(done)
-	defer close(tcp)
+	pcapCh := make(chan packetCapture)
+	tcpcapCh := make(chan tcpCapture)
+	results := make(map[string][]int)
 
-	go wireFilter(handle, tcp, done)
-	t := <-tcp
-	if t.RST {
-		fmt.Println("RST: ", t.SrcPort)
-	} else if t.SYN && t.ACK {
-		fmt.Println("SYN+ACK: ", t.SrcPort)
-	}
+	go capturePackets(handle, pcapCh, done)
+	go decodeTCP(pcapCh, tcpcapCh, done)
+	go recordResults(results, tcpcapCh, done)
+
+	time.Sleep(time.Second) // just a delay right now to keep it together
+	//
+	fmt.Println("RST responses: ", len(results["RST"]))
+	fmt.Println("RST port list: ", results["RST"])
+	fmt.Println("ACK responses: ", len(results["ACK"]))
+
+	done <- true
+	done <- true
 	done <- true
 }
 
