@@ -1,4 +1,20 @@
-#+TITLE: high-performance-scanners
+#+TITLE: Network Scanning in Go
+
+If you want to start playing and hacking on this then here's an example of how
+you can get it running.
+
+You should find that port 80 of nmap's test service is open with. Presently the
+program will simply output SYN+ACK and the port.
+
+You'll have to sudo the following commands.
+
+$ go run main.go scanme.nmap.org 80
+
+Now try another port you expect to be closed (telnet?).
+
+$ go run main.go scanme.nmap.org 23
+
+And you should see that you got back an RST response.
 
 * The state of this repo
 
