@@ -18,14 +18,13 @@ And you should see that you got back an RST response.
 
 * The state of this repo
 
-This isn't currently a model of good Go code. And while the program can send a
-single probe at this time it isn't useful as a scanner. What we have here is an
-explanation of port scanning and the basic code to accomplish it one port at a
-time.
+I now have the pipeline implemented in code for processing responses in 3
+goroutines that pass progressively processed data over channels. It's definitely
+too much for the current CLI implementation which requires that you specify a
+full address in host and port arguments.
 
-I'll add the scanner management when I get time. I also would like to add a few
-other types of scans. If you want to see a play-by-play of how SYN probes work
-or learn how to craft packets in Go then you're in the right place.
+Now that I've proved out the methods that I want to start with using gopacket
+I'll be adding tests and development methodology.
 
 * Why Port Scanning
 
