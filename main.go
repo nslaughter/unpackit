@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"time"
-	"io"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -193,7 +193,11 @@ func (s *Scanner) Capture() {
 
 	go wireFilter(handle, tcp, done)
 	t := <-tcp
-	fmt.Println("RST: ", t.SrcPort)
+	if t.RST {
+		fmt.Println("RST: ", t.SrcPort)
+	} else if t.SYN && t.ACK {
+		fmt.Println("SYN+ACK: ", t.SrcPort)
+	}
 	done <- true
 }
 
