@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"io"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -107,41 +108,94 @@ func (s *Scanner) Probe(dstport layers.TCPPort) {
 	}
 }
 
-// Capture listens for packets and does something with packets that match its rules.
-// This implementation with pcap is a fine proof of concept.
-func (s *Scanner) Capture() {
-	// get a handle to pcap livestream on the port we're sending from
-	handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, pcap.BlockForever)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer handle.Close()
-	handle.SetDirection(pcap.DirectionIn) // tweaking our bpf to only mind inbound
+type packetCapture struct {
+	packetData  []byte
+	captureInfo gopacket.CaptureInfo
+}
 
-	// ipFlow := gopacket.NewFlow(layers.EndpointIPv4, s.dstIP, s.srcIP)
+type TCPCapture struct {
+	tcp         layers.TCP
+	captureInfo gopacket.CaptureInfo
+}
 
+// wireFilter gets a packet off of the wire
+func wireFilter(h *pcap.Handle, tcpCh chan layers.TCP, done <-chan bool) {
 	//result := make(chan gopacket)
 	var eth layers.Ethernet
 	var ip4 layers.IPv4
 	var ip6 layers.IPv6
 	var tcp layers.TCP
+	// WARNING: decoding into layer vars not goroutine safe
 	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp)
 	decoded := []gopacket.LayerType{}
+
+	pcapChan := make(chan packetCapture)
+	defer close(pcapChan)
+
+	go func() {
+		// for exponential backoff when we see EOF
+		sleep := 10 * time.Microsecond
+		for {
+			pd, ci, err := h.ReadPacketData() // blocks forever
+			if err == io.EOF {
+				time.Sleep(sleep)
+				log.Println("Slept ", sleep)
+				sleep *= 2
+			}
+			if err != nil && err != io.EOF {
+				if err == pcap.NextErrorTimeoutExpired {
+					log.Println("TIMEOUT: ", err)
+				} else {
+					log.Println("ERROR: ", err)
+				}
+			}
+			if pd != nil {
+				pcapChan <- packetCapture{packetData: pd, captureInfo: ci}
+				sleep = 10 * time.Microsecond // reset backoff
+			}
+		}
+	}()
+
 	for {
-		data, _, err := handle.ReadPacketData()
-		if err == pcap.NextErrorTimeoutExpired {
-			log.Printf("Timeout Err")
-		} else if err := parser.DecodeLayers(data, &decoded); err != nil {
-			fmt.Fprintf(os.Stderr, "Could not decode layers: %v\n", err)
-			continue
-		} else if tcp.RST {
-			fmt.Println("RST: ", tcp.SrcPort)
-		} else if tcp.SYN && tcp.ACK {
-			fmt.Println("SYN & ACK: ", tcp.SrcPort)
+		// read packets in a new goroutine
+		select {
+		case pcap := <-pcapChan:
+			if err := parser.DecodeLayers(pcap.packetData, &decoded); err != nil {
+				continue
+			} else if tcp.RST {
+				tcpCh <- tcp
+			} else if tcp.SYN && tcp.ACK {
+				tcpCh <- tcp
+			}
+		case <-done:
+			return
 		}
 	}
 }
 
+// Capture listens for packets and does something with packets that match its rules.
+// This implementation with pcap is a fine proof of concept.
+func (s *Scanner) Capture() {
+	//func (s *Scanner) Capture() (<-chan layers.TCP, <-chan error, error) {
+	// get a handle to pcap livestream on the port we're sending from
+	handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, pcap.BlockForever)
+	if err != nil {
+		log.Fatal("Kaboom!")
+	}
+	defer handle.Close()
+	handle.SetDirection(pcap.DirectionIn) // Does this get overwritten by BPFFilter expr?
+	handle.SetBPFFilter(fmt.Sprintf("tcp dst port %d && src host %s", s.srcPort, s.dstIP))
+
+	done := make(chan bool)
+	tcp := make(chan layers.TCP)
+	defer close(done)
+	defer close(tcp)
+
+	go wireFilter(handle, tcp, done)
+	t := <-tcp
+	fmt.Println("RST: ", t.SrcPort)
+	done <- true
+}
 
 func main() {
 	if len(os.Args) != 3 {
