@@ -3,11 +3,11 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"time"
-	"math/rand"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -39,7 +39,6 @@ func (s *Scanner) resolveHost(arg string) error {
 	return nil
 }
 
-
 func (s *Scanner) setLocalAddress() error {
 	serverAddr, err := net.ResolveUDPAddr("udp", s.dstIP.String()+":12345")
 	if err != nil {
@@ -70,7 +69,6 @@ func (s *Scanner) Connect() error {
 func (s *Scanner) Close() {
 	s.conn.Close()
 }
-
 
 // Probe sends a SYN packet to the port given as argument
 func (s *Scanner) Probe(dstport layers.TCPPort) {
@@ -109,7 +107,6 @@ func (s *Scanner) Probe(dstport layers.TCPPort) {
 	}
 }
 
-
 // Capture listens for packets and does something with packets that match its rules.
 // This implementation with pcap is a fine proof of concept.
 func (s *Scanner) Capture() {
@@ -121,38 +118,26 @@ func (s *Scanner) Capture() {
 	defer handle.Close()
 	handle.SetDirection(pcap.DirectionIn) // tweaking our bpf to only mind inbound
 
-	ipFlow := gopacket.NewFlow(layers.EndpointIPv4, s.dstIP, s.srcIP)
+	// ipFlow := gopacket.NewFlow(layers.EndpointIPv4, s.dstIP, s.srcIP)
 
+	//result := make(chan gopacket)
+	var eth layers.Ethernet
+	var ip4 layers.IPv4
+	var ip6 layers.IPv6
+	var tcp layers.TCP
+	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp)
+	decoded := []gopacket.LayerType{}
 	for {
 		data, _, err := handle.ReadPacketData()
 		if err == pcap.NextErrorTimeoutExpired {
-			log.Printf("timeout")
-		} else if err != nil {
-			log.Printf("err reading packet: %v, err")
-		}
-
-		packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy)
-
-		if net := packet.NetworkLayer(); net == nil {
-			log.Printf("packet has no network layer")
-		} else if net.NetworkFlow() != ipFlow {
-			// ignore packets that don't match our connection
-		} else if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer == nil {
-			log.Printf("ipLayer is nil")
-		} else if ip, ok := ipLayer.(*layers.IPv4); !ok {
-			panic("ip layer is not ip layer :-/")
-		} else if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer == nil {
-			// log.Printf("packet has no tcp layer")
-		} else if tcp, ok := tcpLayer.(*layers.TCP); !ok {
-			// We panic here because this is guaranteed to never happen.
-			panic("tcp layer is not tcp layer :-/")
-		} else if tcp.DstPort != layers.TCPPort(tcp.DstPort) {
-			log.Printf("dst port %v does not match", tcp.DstPort)
+			log.Printf("Timeout Err")
+		} else if err := parser.DecodeLayers(data, &decoded); err != nil {
+			fmt.Fprintf(os.Stderr, "Could not decode layers: %v\n", err)
+			continue
 		} else if tcp.RST {
-			log.Printf("RST: src %v, dst %v, IP %v", tcp.SrcPort, tcp.DstPort, ip.SrcIP)
+			fmt.Println("RST: ", tcp.SrcPort)
 		} else if tcp.SYN && tcp.ACK {
-			log.Printf("SYN-ACK: src %v, dst %v, IP %v", tcp.SrcPort, tcp.DstPort, ip.SrcIP)
-		} else {
+			fmt.Println("SYN & ACK: ", tcp.SrcPort)
 		}
 	}
 }
