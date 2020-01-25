@@ -8,11 +8,13 @@ program will simply output SYN+ACK and the port.
 
 You'll have to sudo the following commands.
 
-$ go run main.go scanme.nmap.org 80
+$ go run main.go [hostname | address] 8080
+
+You probably know of plenty of services
 
 Now try another port you expect to be closed (telnet?).
 
-$ go run main.go scanme.nmap.org 23
+$ go run main.go [hostname | address] 23
 
 And you should see that you got back an RST response.
 
@@ -21,7 +23,8 @@ And you should see that you got back an RST response.
 I now have the pipeline implemented in code for processing responses in 3
 goroutines that pass progressively processed data over channels. It's definitely
 too much for the current CLI implementation which requires that you specify a
-full address in host and port arguments.
+full address in host and port arguments.:w
+
 
 Now that I've proved out the methods that I want to start with using gopacket
 I'll be adding tests and development methodology.
@@ -85,7 +88,7 @@ back when that was the predominant approach to port scans. But if Go was a thing
 then one of those scanners might have used some code like this...
 
 ```
-conn, err := net.Dial("tcp", fmt.Printf("scanme.nmap.org:%d", portNo))
+conn, err := net.Dial("tcp", fmt.Printf("scanme.example.com:%d", portNo))
 ```
 
 We would follow that with some code to handle the error like...
