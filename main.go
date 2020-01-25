@@ -24,6 +24,66 @@ type Scanner struct {
 	conn    net.PacketConn
 }
 
+type probe struct {
+	host net.IP
+	port uint64
+	sendTime time.Time
+}
+
+
+// probeWorkers send probes to ports they take from portsCh.
+// They preport when they sent the request on probesCh
+func probeWorker(portsCh chan uint64, localIP net.IP, localPort layers.TCPPort, hostIP net.IP) (chan probe, chan error) {
+	ip := &layers.IPv4{
+		SrcIP:    localIP,
+		DstIP:    hostIP,
+		Protocol: layers.IPProtocolTCP,
+	}
+	// Our TCP header
+	tcp := &layers.TCP{
+		SrcPort: localPort,
+		DstPort: 0000,  // has to be reset on each run
+		Seq:     0000,
+		SYN:     true,
+		Window:  14600,
+	}
+
+	probeCh := make (chan probe)
+	errCh := make (chan error)
+
+	conn, err := net.ListenPacket("ip4:tcp", fmt.Sprintf("%s", "0.0.0.0"))
+	if err != nil {
+		errCh <- err
+		return nil, nil
+	}
+
+	go func(ip *layers.IPv4, tcp *layers.TCP) {
+		for p := range portsCh {
+			tcp.SetNetworkLayerForChecksum(ip)
+			buf := gopacket.NewSerializeBuffer()
+			opts := gopacket.SerializeOptions{
+				ComputeChecksums: true,
+				FixLengths:       true,
+			}
+			tcp.DstPort = layers.TCPPort(p)
+			tcp.Seq = rand.Uint32() / 2
+			// serialize for the wire
+			if err := gopacket.SerializeLayers(buf, opts, tcp); err != nil {
+				errCh <- err
+				//log.Fatal(err)
+			}
+			// write the SYN to the wire
+			if _, err := conn.WriteTo(buf.Bytes(), &net.IPAddr{IP: ip.DstIP}); err != nil {
+				errCh <- err
+				//log.Fatal(err)
+			}
+			// report the successful send of this probe
+			probeCh <- probe{host: ip.DstIP, port: p, sendTime: time.Now()}
+		}
+	}(ip, tcp)
+	return probeCh, errCh
+}
+
 // straightforward address resolution. Note that this is going to be
 // a few microseconds if you're recently resolved thd address and quite a
 // few milliseconds if the TTL of the record is expire on this machine. So
@@ -228,6 +288,7 @@ func (s *Scanner) Capture() {
 	fmt.Println("RST responses: ", len(results["RST"]))
 	fmt.Println("RST port list: ", results["RST"])
 	fmt.Println("ACK responses: ", len(results["ACK"]))
+	fmt.Println("ACK port list: ", results["ACK"])
 
 	done <- true
 	done <- true
@@ -251,19 +312,48 @@ func main() {
 		log.Fatal(err)
 	}
 
-	var dstport layers.TCPPort
-	if d, err := strconv.ParseUint(os.Args[2], 10, 16); err != nil {
+	// var dstport layers.TCPPort
+	var d uint64
+	if d, err = strconv.ParseUint(os.Args[2], 10, 16); err != nil {
 		log.Fatal(err)
-	} else {
-		dstport = layers.TCPPort(d)
-	}
+	} //else {
+	//	dstport = layers.TCPPort(d)
+	//}
 
 	// initialize scanner
 	if err := s.Connect(); err != nil {
 		log.Fatal(err)
 	}
+	portsCh := make(chan uint64)
+	probesCh, errCh := probeWorker(portsCh, s.srcIP, s.srcPort, s.dstIP)
+	portsCh <- d
+	//fmt.Println(<-probesCh, <-errCh)
+	//	portsCh <- 90
+	//  fmt.Println(<-probesCh, <-errCh)
+	// s.Probe(dstport)
+	select {
+	case pr := <- probesCh:
+		fmt.Println(pr)
+	case er := <- errCh:
+		fmt.Println(er)
+	}
 
-	s.Probe(dstport)
+	portsCh <- 90
+	select {
+	case pr := <- probesCh:
+		fmt.Println(pr)
+	case er := <- errCh:
+		fmt.Println(er)
+	}
+	portsCh <- 22
+	select {
+	case pr := <- probesCh:
+		fmt.Println(pr)
+	case er := <- errCh:
+		fmt.Println(er)
+	}
+
+	close(portsCh) // since it's bound to range this cleans it up
 
 	s.Capture()
 }
