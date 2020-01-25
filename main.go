@@ -123,7 +123,7 @@ type tcpCapture struct {
 func capturePackets(h *pcap.Handle, pcapCh chan<- packetCapture, done <-chan bool) {
 		sleep := 10 * time.Microsecond
 		for {
-			pd, ci, err := h.ReadPacketData() // blocks forever
+			pd, ci, err := h.ReadPacketData()
 			if err == io.EOF {
 				time.Sleep(sleep)
 				log.Println("Slept ", sleep)
@@ -131,7 +131,7 @@ func capturePackets(h *pcap.Handle, pcapCh chan<- packetCapture, done <-chan boo
 			}
 			if err != nil && err != io.EOF {
 				if err == pcap.NextErrorTimeoutExpired {
-					log.Println("TIMEOUT: ", err)
+					// log.Println("TIMEOUT: ", err)
 				} else {
 					log.Println("ERROR: ", err)
 				}
@@ -165,8 +165,8 @@ func decodeTCP(pcapCh <-chan packetCapture, tcpcapCh chan<- tcpCapture, done <-c
 		select {
 		case pcap := <-pcapCh:
 			if err := parser.DecodeLayers(pcap.packetData, &decoded); err != nil {
-				// TODO(@nslaughter): some error conditions will still contain interesting info.
-				fmt.Println(err)
+				// TODO(@nslaughter): some error conditions will still have useful layer info.
+				log.Println(err)
 				continue
 			} else {
 				tcpcapCh <- tcpCapture{tcp, pcap.captureInfo}
@@ -189,7 +189,6 @@ func recordResults(results map[string][]int, tcpcapCh <-chan tcpCapture, done <-
 	for {
 		select {
 		case tcpcap := <-tcpcapCh:
-			fmt.Println("Read packet in tcpcap")
 			if tcpcap.tcp.RST {
 				results["RST"] = append(results["RST"], int(tcpcap.tcp.SrcPort))
 			} else if tcpcap.tcp.SYN && tcpcap.tcp.ACK {
@@ -206,7 +205,8 @@ func recordResults(results map[string][]int, tcpcapCh <-chan tcpCapture, done <-
 func (s *Scanner) Capture() {
 	//func (s *Scanner) Capture() (<-chan layers.TCP, <-chan error, error) {
 	// get a handle to pcap livestream on the port we're sending from
-	handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, pcap.BlockForever)
+	//handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, pcap.BlockForever)
+	handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, time.Microsecond * 20)
 	if err != nil {
 		log.Fatal("Kaboom!")
 	}
@@ -223,7 +223,7 @@ func (s *Scanner) Capture() {
 	go decodeTCP(pcapCh, tcpcapCh, done)
 	go recordResults(results, tcpcapCh, done)
 
-	time.Sleep(time.Second) // just a delay right now to keep it together
+	time.Sleep(time.Second)
 	//
 	fmt.Println("RST responses: ", len(results["RST"]))
 	fmt.Println("RST port list: ", results["RST"])
