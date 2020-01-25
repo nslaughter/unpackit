@@ -42,7 +42,7 @@ func probeWorker(portsCh chan uint64, localIP net.IP, localPort layers.TCPPort, 
 	// Our TCP header
 	tcp := &layers.TCP{
 		SrcPort: localPort,
-		DstPort: 0000,  // has to be reset on each run
+		DstPort: 0000,  // her for visibiltiy - has to be set per probe
 		Seq:     0000,
 		SYN:     true,
 		Window:  14600,
@@ -129,43 +129,6 @@ func (s *Scanner) Connect() error {
 // Close releases the resources of the connection in the Scanner.
 func (s *Scanner) Close() {
 	s.conn.Close()
-}
-
-// Probe sends a SYN packet to the port given as argument
-func (s *Scanner) Probe(dstport layers.TCPPort) {
-	// Our IP header... only necessary for TCP checksumming.
-	ip := &layers.IPv4{
-		SrcIP:    s.srcIP,
-		DstIP:    s.dstIP,
-		Protocol: layers.IPProtocolTCP,
-	}
-	// Our TCP header
-	tcp := &layers.TCP{
-		SrcPort: s.srcPort,
-		DstPort: dstport,
-		Seq:     rand.Uint32() / 2,
-		SYN:     true,
-		Window:  14600,
-	}
-	tcp.SetNetworkLayerForChecksum(ip)
-	buf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{
-		ComputeChecksums: true,
-		FixLengths:       true,
-	}
-	// serialize for the wire
-	if err := gopacket.SerializeLayers(buf, opts, tcp); err != nil {
-		log.Fatal(err)
-	}
-	// write the SYN to the wire
-	if _, err := s.conn.WriteTo(buf.Bytes(), &net.IPAddr{IP: s.dstIP}); err != nil {
-		log.Fatal(err)
-	}
-
-	// Set deadline so we don't wait forever.
-	if err := s.conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		log.Fatal(err)
-	}
 }
 
 type packetCapture struct {
@@ -263,9 +226,7 @@ func recordResults(results map[string][]int, tcpcapCh <-chan tcpCapture, done <-
 // Capture listens for packets and does something with packets that match its rules.
 // This implementation with pcap is a fine proof of concept.
 func (s *Scanner) Capture() {
-	//func (s *Scanner) Capture() (<-chan layers.TCP, <-chan error, error) {
 	// get a handle to pcap livestream on the port we're sending from
-	//handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, pcap.BlockForever)
 	handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, time.Microsecond * 20)
 	if err != nil {
 		log.Fatal("Kaboom!")
@@ -312,13 +273,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// var dstport layers.TCPPort
 	var d uint64
 	if d, err = strconv.ParseUint(os.Args[2], 10, 16); err != nil {
 		log.Fatal(err)
 	} //else {
-	//	dstport = layers.TCPPort(d)
-	//}
 
 	// initialize scanner
 	if err := s.Connect(); err != nil {
@@ -327,10 +285,7 @@ func main() {
 	portsCh := make(chan uint64)
 	probesCh, errCh := probeWorker(portsCh, s.srcIP, s.srcPort, s.dstIP)
 	portsCh <- d
-	//fmt.Println(<-probesCh, <-errCh)
-	//	portsCh <- 90
-	//  fmt.Println(<-probesCh, <-errCh)
-	// s.Probe(dstport)
+
 	select {
 	case pr := <- probesCh:
 		fmt.Println(pr)
