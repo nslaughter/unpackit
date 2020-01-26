@@ -284,31 +284,25 @@ func main() {
 	}
 	portsCh := make(chan uint64)
 	probesCh, errCh := probeWorker(portsCh, s.srcIP, s.srcPort, s.dstIP)
+
+	// this is our reporting function
+	go func() {
+		for {
+			select {
+			case pr := <- probesCh:
+				fmt.Println(pr)
+			case er := <- errCh:
+				fmt.Println(er)
+			}
+		}
+	}()
+
+	// here is our dispatch for ports to scan
 	portsCh <- d
-
-	select {
-	case pr := <- probesCh:
-		fmt.Println(pr)
-	case er := <- errCh:
-		fmt.Println(er)
-	}
-
 	portsCh <- 90
-	select {
-	case pr := <- probesCh:
-		fmt.Println(pr)
-	case er := <- errCh:
-		fmt.Println(er)
-	}
 	portsCh <- 22
-	select {
-	case pr := <- probesCh:
-		fmt.Println(pr)
-	case er := <- errCh:
-		fmt.Println(er)
-	}
 
-	close(portsCh) // since it's bound to range this cleans it up
+	close(portsCh) // close when we're done sending
 
 	s.Capture()
 }
