@@ -1,18 +1,23 @@
 #+TITLE: Network Scanning in Go
 
 If you want to start playing and hacking on this then here's an example of how
-you can get it running.
+you can get this code running.
 
 You should find that port 80 of nmap's test service is open with. Presently the
 program will simply output SYN+ACK and the port.
 
 You'll have to sudo the following commands.
 
+Try running this with the name or address of a server you know is up for HTTP.
+
 $ go run main.go [hostname | address] 8080
 
-You probably know of plenty of services
+Like many internetworking APIs this library will take a hostname such as
+example.com or an address such as 127.0.0.1 or even the 128 byte form. But I
+doubt you're typing IPv6 addresses just to test some code :)
 
-Now try another port you expect to be closed (telnet?).
+To verify that we're getting different responses for open vs closed ports try
+another port you expect to be closed (telnet?).
 
 $ go run main.go [hostname | address] 23
 
@@ -20,14 +25,89 @@ And you should see that you got back an RST response.
 
 * The state of this repo
 
-I now have the pipeline implemented in code for processing responses in 3
-goroutines that pass progressively processed data over channels. It's definitely
-too much for the current CLI implementation which requires that you specify a
-full address in host and port arguments.:w
+I've sorted out enough about methods to get the granular level of control that I
+want for this application. The code probably looks like a big ball of untested
+mud, but it's served it's purpose. Now here's the design that I want.
 
+This will actually work as a library for building scanner applications. The goal
+is that we could configure a variety of applications to map networks... possibly
+on a timer to security documentation. Here's how a scan will work...
 
-Now that I've proved out the methods that I want to start with using gopacket
-I'll be adding tests and development methodology.
+** A scanner is an event mediator.
+
+In our architecture the requests or accomplishment of work will be an event,
+represented by a message to the scanner. The scanner will be an event mediator.
+
+It receives scan requests from the application, which we aren't specifying right
+now. It could be a CLI, a web portal, whatever. In response it produces scan
+results.
+
+Our scanner also performs a single type of scan. That's not only to say that
+we're just implementing the TCP SYN scan initially. The other point here is that
+this outline anticipates sending a single type of probe which there are several
+protocols that scanners use.
+
+Here's a scan request...
+
+ScanRequestMsg {
+    ScanType             enum (TCP-SYN is the foundation)
+    Addressses           []Address
+    PortRanges           []String
+    ---
+    RateLimit            string (values like "60s", "1s", "100ms")
+    MaxConcurrentProbes  int
+}
+
+To fullfill this request the scanner will create (1) a Prober that will send
+probes through a rate limiter. The worker pool will have at least one network
+connection where it will send probes. And (2) a listener that will read incoming
+packets.
+
+Then the scanner will send the Prober it's ProbeRequest messages which look as
+follows.
+
+ProbeRequestMsg {
+    Address              Address
+    Port                 Port
+    ProbeType            enum (correspondence with ScanType)
+}
+
+The Prober will send a message to the scanner immediately after it sends a
+probe. And then it will respond with a ProbeSentMsg.
+
+ProbeSentMsg {
+    Address              Address
+    Port                 Port
+    ProbeType            enum (correspondence with ScanType)
+    TimeStamp            time.Time
+    Try                  int // which try is this? For tracking resend.
+}
+
+The scanner will also create a probe Listener. The listener will filter messages
+that interest us and send extracted information.
+
+When a scanner receives a ProbeSentMessage it will add the probe to a
+SentProbesQueue which is watched by a validator. The ProbeSentQueue has a
+timeout value which the validator will use as it pulls items from the queue and
+checks whether they're stored in the ResultStore. We'll have more to say about
+the ResultStore in a moment.
+
+ResultReceivedMsg {
+    Address
+    Port
+    PortState            enum
+    TimeStamp            time.Time
+}
+
+The scanner will write the relevant responses to it's ResultStore when it gets a
+ResultReceivedMsg. The result store will consist of the following.
+
+A map where keys are ports of sent requests. Values will be responses.
+A slice for each type of result with the relevant results in it.
+
+Implementing the scanner strickly with concrete networking components won't make
+it testable without external infrastructure. So our scanner and its components
+will need to work as an interface.
 
 * Why Port Scanning
 
