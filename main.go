@@ -24,6 +24,7 @@ type Scanner struct {
 	conn    net.PacketConn
 }
 
+// probe is a simple value object that can be passed to a Prober
 type probe struct {
 	host net.IP
 	port uint64
@@ -84,37 +85,38 @@ func probeWorker(portsCh chan uint64, localIP net.IP, localPort layers.TCPPort, 
 	return probeCh, errCh
 }
 
-// straightforward address resolution. Note that this is going to be
-// a few microseconds if you're recently resolved thd address and quite a
-// few milliseconds if the TTL of the record is expire on this machine. So
-// put this in an init or warm-up section so it won't be counted in latency stats
-// and incorrectly influence program behavior or reporting.
-func (s *Scanner) resolveHost(arg string) error {
-	// resolve host address or IP to get a []net.IP
+// resolveHost takes a domain string and attempts to resolve it to an IPv4 address
+// It returns an empty string and error value if it cannot resolve.
+func resolveHost(arg string) (net.IP, error) {
 	dstaddrs, err := net.LookupIP(arg)
+	if err != nil {
+		return nil, err
+	}
+	// parse the dst host and port from the cmd line os.Args
+	ip := dstaddrs[0].To4()
+	return ip, nil
+}
+
+// Bind will bind a local port. We'll subsequently use this port in our outbound
+// packets. And then filter.
+func (s *Scanner) Bind(host string) error {
+	hostIP, err := resolveHost(host)
 	if err != nil {
 		return err
 	}
-	// parse the dst host and port from the cmd line os.Args
-	s.dstIP = dstaddrs[0].To4()
+	s.dstIP = hostIP
+	conn, err := net.Dial("udp", s.dstIP.String()+":8888")
+	if err != nil {
+		return err
+	}
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		s.srcIP = addr.IP
+		s.srcPort = layers.TCPPort(addr.Port)
+		fmt.Printf("Local Address is %s:%v", s.srcIP.String(), s.srcPort)
+	}
 	return nil
 }
 
-func (s *Scanner) setLocalAddress() error {
-	serverAddr, err := net.ResolveUDPAddr("udp", s.dstIP.String()+":12345")
-	if err != nil {
-		return err
-	}
-
-	// We don't actually connect to anything, but use the net library to
-	if conn, err := net.DialUDP("udp", nil, serverAddr); err == nil {
-		if udpaddr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
-			s.srcIP = udpaddr.IP
-			s.srcPort = layers.TCPPort(udpaddr.Port)
-		}
-	}
-	return err
-}
 
 // Connect gets a connection for sending packets
 func (s *Scanner) Connect() error {
@@ -123,6 +125,7 @@ func (s *Scanner) Connect() error {
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -265,23 +268,21 @@ func main() {
 
 	// configure scanner
 	s := Scanner{}
-	if err := s.resolveHost(os.Args[1]); err != nil {
-		log.Fatal(err)
-	}
-	err := s.setLocalAddress()
-	if err != nil {
+
+	addr := os.Args[1]
+	var port uint64
+	var err error
+	if port, err = strconv.ParseUint(os.Args[2], 10, 16); err != nil {
 		log.Fatal(err)
 	}
 
-	var d uint64
-	if d, err = strconv.ParseUint(os.Args[2], 10, 16); err != nil {
+	if err := s.Bind(addr); err != nil {
 		log.Fatal(err)
-	} //else {
-
-	// initialize scanner
+	}
 	if err := s.Connect(); err != nil {
 		log.Fatal(err)
 	}
+
 	portsCh := make(chan uint64)
 	probesCh, errCh := probeWorker(portsCh, s.srcIP, s.srcPort, s.dstIP)
 
@@ -298,7 +299,7 @@ func main() {
 	}()
 
 	// here is our dispatch for ports to scan
-	portsCh <- d
+	portsCh <- port
 	portsCh <- 90
 	portsCh <- 22
 
