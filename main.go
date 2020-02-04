@@ -226,11 +226,35 @@ func recordResults(results map[string][]int, tcpcapCh <-chan tcpCapture, done <-
 	}
 }
 
+// getFirstNetworkInterface gets the first network interface that is up
+// and is not a loopback interface. It simply gets the interfaces and ranges
+// over the list until the first one that satisfies criteria.
+func getFirstNetworkInterface() (net.Interface, error) {
+	ifis, err := net.Interfaces()
+	if err != nil {
+		return net.Interface{}, err
+	}
+	for _, ifi := range ifis {
+		// FlagUp is True
+		if (net.FlagUp & ifi.Flags) != 0 {
+			// FlabLoopback is False
+			if (net.FlagLoopback & ifi.Flags) == 0 {
+				return ifi, nil
+			}
+		}
+	}
+	return net.Interface{}, fmt.Errorf("ERROR: Couldn't find a network interface.")
+}
+
 // Capture listens for packets and does something with packets that match its rules.
 // This implementation with pcap is a fine proof of concept.
 func (s *Scanner) Capture() {
+	ifi, err := getFirstNetworkInterface()
+	if err != nil {
+		log.Fatal(err)
+	}
 	// get a handle to pcap livestream on the port we're sending from
-	handle, err := pcap.OpenLive("en0", int32(s.srcPort), true, time.Microsecond * 20)
+	handle, err := pcap.OpenLive(ifi.Name, int32(s.srcPort), true, time.Microsecond * 20)
 	if err != nil {
 		log.Fatal("Kaboom!")
 	}
@@ -266,10 +290,12 @@ func main() {
 	}
 	log.Println("starting")
 
+
 	// configure scanner
 	s := Scanner{}
 
 	addr := os.Args[1]
+
 	var port uint64
 	var err error
 	if port, err = strconv.ParseUint(os.Args[2], 10, 16); err != nil {

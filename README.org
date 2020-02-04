@@ -3,9 +3,6 @@
 If you want to start playing and hacking on this then here's an example of how
 you can get this code running.
 
-You should find that port 80 of nmap's test service is open with. Presently the
-program will simply output SYN+ACK and the port.
-
 You'll have to sudo the following commands.
 
 Try running this with the name or address of a server you know is up for HTTP.
@@ -26,8 +23,8 @@ And you should see that you got back an RST response.
 * The state of this repo
 
 I've sorted out enough about methods to get the granular level of control that I
-want for this application. The code probably looks like a big ball of untested
-mud, but it's served it's purpose. Now here's the design that I want.
+want for this application. The code looks like a big ball of untested mud, but
+it's served it's purpose. Now here's the design that I want.
 
 This will actually work as a library for building scanner applications. The goal
 is that we could configure a variety of applications to map networks... possibly
