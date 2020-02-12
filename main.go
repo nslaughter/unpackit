@@ -3,11 +3,11 @@ package main
 import (
 	"fmt"
 	"io"
-	"log"
+	//	"log"
 	"math/rand"
 	"net"
-	"os"
-	"strconv"
+	//	"os"
+	//	"strconv"
 	"time"
 
 	"github.com/google/gopacket"
@@ -15,215 +15,85 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
-// Scanner is the basic implementation of what we need to launch
-// scans.
-type Scanner struct {
-	srcIP   net.IP
-	dstIP   net.IP
-	srcPort layers.TCPPort
-	conn    net.PacketConn
+type Port int
+
+type Probe []byte
+
+type SynProber struct {
+	router Router
+	ip *layers.IPv4
+	tcp *layers.TCP
+	conn net.PacketConn
+
+	done chan struct{}
+	errs chan error
 }
 
-// probe is a simple value object that can be passed to a Prober
-type probe struct {
-	host net.IP
-	port uint64
-	sendTime time.Time
-}
-
-
-// probeWorkers send probes to ports they take from portsCh.
-// They preport when they sent the request on probesCh
-func probeWorker(portsCh chan uint64, localIP net.IP, localPort layers.TCPPort, hostIP net.IP) (chan probe, chan error) {
+func NewSynProber(host string) (*SynProber, error) {
+	r, err := NewRouter(host)
+	if err != nil {
+		return nil, err
+	}
 	ip := &layers.IPv4{
-		SrcIP:    localIP,
-		DstIP:    hostIP,
+		SrcIP:    r.localIP,
+		DstIP:    net.ParseIP(r.dstIP.String()),
 		Protocol: layers.IPProtocolTCP,
 	}
-	// Our TCP header
+	fmt.Println("Setting port: ", r.localPort)
+	p := layers.TCPPort(r.localPort) // typecast
 	tcp := &layers.TCP{
-		SrcPort: localPort,
-		DstPort: 0000,  // her for visibiltiy - has to be set per probe
+		SrcPort: p,
+		DstPort: 0000,
 		Seq:     0000,
 		SYN:     true,
 		Window:  14600,
 	}
+	sp := &SynProber{router: *r, ip: ip, tcp: tcp}
+	sp.done = make(chan struct{})
+	sp.errs = make(chan error)
 
-	probeCh := make (chan probe)
-	errCh := make (chan error)
-
-	conn, err := net.ListenPacket("ip4:tcp", fmt.Sprintf("%s", "0.0.0.0"))
-	if err != nil {
-		errCh <- err
-		return nil, nil
-	}
-
-	go func(ip *layers.IPv4, tcp *layers.TCP) {
-		for p := range portsCh {
-			tcp.SetNetworkLayerForChecksum(ip)
-			buf := gopacket.NewSerializeBuffer()
-			opts := gopacket.SerializeOptions{
-				ComputeChecksums: true,
-				FixLengths:       true,
-			}
-			tcp.DstPort = layers.TCPPort(p)
-			tcp.Seq = rand.Uint32() / 2
-			// serialize for the wire
-			if err := gopacket.SerializeLayers(buf, opts, tcp); err != nil {
-				errCh <- err
-				//log.Fatal(err)
-			}
-			// write the SYN to the wire
-			if _, err := conn.WriteTo(buf.Bytes(), &net.IPAddr{IP: ip.DstIP}); err != nil {
-				errCh <- err
-				//log.Fatal(err)
-			}
-			// report the successful send of this probe
-			probeCh <- probe{host: ip.DstIP, port: p, sendTime: time.Now()}
-		}
-	}(ip, tcp)
-	return probeCh, errCh
+	return sp, nil
 }
 
-// resolveHost takes a domain string and attempts to resolve it to an IPv4 address
-// It returns an empty string and error value if it cannot resolve.
-func resolveHost(arg string) (net.IP, error) {
-	dstaddrs, err := net.LookupIP(arg)
-	if err != nil {
-		return nil, err
-	}
-	// parse the dst host and port from the cmd line os.Args
-	ip := dstaddrs[0].To4()
-	return ip, nil
+type Prober interface {
+	Connect() error
+	Send(p Probe) (int, error)
+	Listen() error
 }
 
-// Bind will bind a local port. We'll subsequently use this port in our outbound
-// packets. And then filter.
-func (s *Scanner) Bind(host string) error {
-	hostIP, err := resolveHost(host)
-	if err != nil {
-		return err
-	}
-	s.dstIP = hostIP
-	conn, err := net.Dial("udp", s.dstIP.String()+":8888")
-	if err != nil {
-		return err
-	}
-	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
-		s.srcIP = addr.IP
-		s.srcPort = layers.TCPPort(addr.Port)
-		fmt.Printf("Local Address is %s:%v", s.srcIP.String(), s.srcPort)
-	}
-	return nil
+// ProbeMaker is going to take the place of MakeProbe
+type ProbeMaker interface {
+	Make(dst Port) ([]byte, error)
 }
 
+// ProbeWorker is a decorator for a Prober
+type ProbeSendWorker interface {
+	Prober
+	Work(chan Port) (chan error)
+}
 
-// Connect gets a connection for sending packets
-func (s *Scanner) Connect() error {
+type ProbeListenWorker interface {
+	Prober
+	Work() (chan error)
+}
+
+// Connect returns a PacketConn for reading and writing bytes to the network.
+// It is the caller's responsibility to close the connection.
+func (sp *SynProber) Connect() error {
 	var err error
-	s.conn, err = net.ListenPacket("ip4:tcp", fmt.Sprintf("%s", "0.0.0.0"))
+	// sp.conn, err = net.ListenPacket("ip4:tcp", fmt.Sprintf("%s", sp.router.localIP))
+	sp.conn, err = net.ListenPacket("ip4:tcp", fmt.Sprintf("%s", sp.router.localIP))
 	if err != nil {
 		return err
 	}
-
+	if addr, ok := sp.conn.LocalAddr().(*net.UDPAddr); ok {
+		fmt.Println("Port is: ", addr.Port)
+		sp.router.localPort = Port(addr.Port)
+	} else {
+		fmt.Println("Address is: ", addr)
+		fmt.Println(sp.conn.LocalAddr())
+	}
 	return nil
-}
-
-// Close releases the resources of the connection in the Scanner.
-func (s *Scanner) Close() {
-	s.conn.Close()
-}
-
-type packetCapture struct {
-	packetData  []byte
-	captureInfo gopacket.CaptureInfo
-}
-
-type tcpCapture struct {
-	tcp         layers.TCP
-	captureInfo gopacket.CaptureInfo
-}
-
-// capturePackets reads the wire with using h - the pcap.Handle, sends the packetCapture
-// on the pcapCh channel, and quits if it reads from the done channel
-func capturePackets(h *pcap.Handle, pcapCh chan<- packetCapture, done <-chan bool) {
-		sleep := 10 * time.Microsecond
-		for {
-			pd, ci, err := h.ReadPacketData()
-			if err == io.EOF {
-				time.Sleep(sleep)
-				log.Println("Slept ", sleep)
-				sleep *= 2
-			}
-			if err != nil && err != io.EOF {
-				if err == pcap.NextErrorTimeoutExpired {
-					// log.Println("TIMEOUT: ", err)
-				} else {
-					log.Println("ERROR: ", err)
-				}
-			}
-			if pd != nil {
-				// ???
-				pcapCh <- packetCapture{packetData: pd, captureInfo: ci}
-				sleep = 10 * time.Microsecond // reset backoff
-			}
-			select {
-			case <-done:
-				return
-			default:
-				continue
-			}
-		}
-}
-
-
-// decodeTCP decodes our packet capture into a TCP specific representation
-func decodeTCP(pcapCh <-chan packetCapture, tcpcapCh chan<- tcpCapture, done <-chan bool) {
-	var eth layers.Ethernet
-	var ip4 layers.IPv4
-	var ip6 layers.IPv6
-	var tcp layers.TCP
-	// WARNING: decoding into layer vars not goroutine safe
-	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp)
-	decoded := []gopacket.LayerType{}
-
-	for {
-		select {
-		case pcap := <-pcapCh:
-			if err := parser.DecodeLayers(pcap.packetData, &decoded); err != nil {
-				// TODO(@nslaughter): some error conditions will still have useful layer info.
-				log.Println(err)
-				continue
-			} else {
-				tcpcapCh <- tcpCapture{tcp, pcap.captureInfo}
-			}
-		case <-done:
-			return
-		}
-	}
-}
-
-
-// recordResults will just put the report from parsing the captured packets
-func recordResults(results map[string][]int, tcpcapCh <-chan tcpCapture, done <-chan bool) {
-	if results["RST"] == nil {
-		results["RST"] = make([]int, 0)
-	}
-	if results["ACK"] == nil {
-		results["ACK"] = make([]int, 0)
-	}
-	for {
-		select {
-		case tcpcap := <-tcpcapCh:
-			if tcpcap.tcp.RST {
-				results["RST"] = append(results["RST"], int(tcpcap.tcp.SrcPort))
-			} else if tcpcap.tcp.SYN && tcpcap.tcp.ACK {
-				results["ACK"] = append(results["ACK"], int(tcpcap.tcp.SrcPort))
-			}
-		case <-done:
-			return
-		}
-	}
 }
 
 // getFirstNetworkInterface gets the first network interface that is up
@@ -246,90 +116,161 @@ func getFirstNetworkInterface() (net.Interface, error) {
 	return net.Interface{}, fmt.Errorf("ERROR: Couldn't find a network interface.")
 }
 
-// Capture listens for packets and does something with packets that match its rules.
-// This implementation with pcap is a fine proof of concept.
-func (s *Scanner) Capture() {
+
+func (sp *SynProber) StartListening(to time.Duration) {
+	var eth layers.Ethernet
+	var ip4 layers.IPv4
+	var ip6 layers.IPv6
+	var tcp layers.TCP
+
 	ifi, err := getFirstNetworkInterface()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(err)
 	}
 	// get a handle to pcap livestream on the port we're sending from
-	handle, err := pcap.OpenLive(ifi.Name, int32(s.srcPort), true, time.Microsecond * 20)
+	handle, err := pcap.OpenLive(ifi.Name, int32(sp.router.localPort), true, time.Microsecond * 20)
 	if err != nil {
-		log.Fatal("Kaboom!")
+		fmt.Println("No handle! Try harder.")
 	}
 	defer handle.Close()
 	handle.SetDirection(pcap.DirectionIn) // Does this get overwritten by BPFFilter expr?
-	handle.SetBPFFilter(fmt.Sprintf("dst port %d && src host %s", s.srcPort, s.dstIP))
+	handle.SetBPFFilter(fmt.Sprintf("dst port %d && src host %s", int(sp.router.localPort), sp.router.dstIP.IP))
 
-	done := make(chan bool)
-	pcapCh := make(chan packetCapture)
-	tcpcapCh := make(chan tcpCapture)
-	results := make(map[string][]int)
+	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp)
+	decoded := []gopacket.LayerType{}
 
-	go capturePackets(handle, pcapCh, done)
-	go decodeTCP(pcapCh, tcpcapCh, done)
-	go recordResults(results, tcpcapCh, done)
-
-	time.Sleep(time.Second)
-	//
-	fmt.Println("RST responses: ", len(results["RST"]))
-	fmt.Println("RST port list: ", results["RST"])
-	fmt.Println("ACK responses: ", len(results["ACK"]))
-	fmt.Println("ACK port list: ", results["ACK"])
-
-	done <- true
-	done <- true
-	done <- true
-}
-
-func main() {
-	if len(os.Args) != 3 {
-		log.Printf("Usage: %s <host/ip> <port>\n", os.Args[0])
-		os.Exit(-1)
-	}
-	log.Println("starting")
-
-
-	// configure scanner
-	s := Scanner{}
-
-	addr := os.Args[1]
-
-	var port uint64
-	var err error
-	if port, err = strconv.ParseUint(os.Args[2], 10, 16); err != nil {
-		log.Fatal(err)
-	}
-
-	if err := s.Bind(addr); err != nil {
-		log.Fatal(err)
-	}
-	if err := s.Connect(); err != nil {
-		log.Fatal(err)
-	}
-
-	portsCh := make(chan uint64)
-	probesCh, errCh := probeWorker(portsCh, s.srcIP, s.srcPort, s.dstIP)
-
-	// this is our reporting function
 	go func() {
+		sleep := 10 * time.Microsecond
 		for {
+			pd, ci, err := handle.ReadPacketData()
+			if err == io.EOF {
+				time.Sleep(sleep)
+				sleep *= 2
+				continue
+			} else if err != nil {
+				if err == pcap.NextErrorTimeoutExpired {
+					// log
+				} else {
+					fmt.Println("ERROR: ", err)
+				}
+			}
+			if pd != nil {
+				sleep = 10 * time.Microsecond
+				if err := parser.DecodeLayers(pd, &decoded); err != nil {
+					fmt.Println(ci)
+					continue
+				}
+			}
 			select {
-			case pr := <- probesCh:
-				fmt.Println(pr)
-			case er := <- errCh:
-				fmt.Println(er)
+			case <- sp.done:
+				return
+			default:
+				continue
 			}
 		}
 	}()
+}
 
-	// here is our dispatch for ports to scan
-	portsCh <- port
-	portsCh <- 90
-	portsCh <- 22
+/*
+func (sp *SynProber) StartListening(to time.Duration) {
+	// set a timeout
+	for {
+		var p []byte
+		select {
 
-	close(portsCh) // close when we're done sending
+		case <- sp.done:
 
-	s.Capture()
+		default:
+			if err := sp.conn.SetReadDeadline(time.Now().Add(to)); err != nil {
+				sp.errs <- err
+			}
+			n, addr, err := sp.conn.ReadFrom(p)
+			if err != nil {
+				sp.errs <- err
+			}
+			fmt.Println("Bytes: ", n, " Address: ", addr)
+			fmt.Println(p)
+		}
+	}
+}
+*/
+// Close wraps the connection's Close method
+func (sp *SynProber) Close() error {
+	return sp.conn.Close()
+}
+
+func (sp *SynProber) Send(dst Port) (int, error) {
+	probe, err := sp.MakeProbe(dst)
+	if err != nil {
+		return 0, err
+	}
+	fmt.Println(probe)
+	return sp.conn.WriteTo(probe, &net.IPAddr{IP: sp.router.dstIP.IP})
+}
+
+// MakeProbe calculates new TCP header values
+func (sp *SynProber) MakeProbe(dst Port) ([]byte, error) {
+	sp.tcp.SetNetworkLayerForChecksum(sp.ip)
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		ComputeChecksums: true,
+		FixLengths: true,
+	}
+	sp.tcp.DstPort = layers.TCPPort(dst)
+	sp.tcp.Seq = rand.Uint32() / 2
+
+	if err := gopacket.SerializeLayers(buf, opts, sp.tcp); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+type Router struct {
+	localIP net.IP
+	localPort Port
+	dstIP net.IPAddr
+}
+
+func (r *Router) setHostAddress(host string) error {
+	dstaddrs, err := net.LookupIP(host)
+	if err != nil {
+		return err
+	}
+	r.dstIP = net.IPAddr{IP: dstaddrs[0]}
+
+	return nil
+}
+
+
+func (r *Router) setLocalAddress(host string) error {
+	conn, err := net.Dial("udp", r.dstIP.String()+":8888")
+	if err != nil {
+		return err
+	}
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		r.localIP = addr.IP
+		r.localPort = Port(addr.Port)
+		fmt.Println("Set localPort = ", r.localPort)
+	}
+	defer conn.Close()
+	return nil
+}
+
+// setAddresses just returns error condition for side effects setting the Router
+// fields with data from the net library
+func (r *Router) setAddresses(host string) error {
+	if err := r.setHostAddress(host); err != nil {
+		return err
+	}
+	return r.setLocalAddress(host)
+}
+
+// NewRouter configures the route
+func NewRouter(host string) (*Router, error) {
+	r := &Router{}
+	if err := r.setAddresses(host); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
